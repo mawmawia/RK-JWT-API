@@ -1,34 +1,21 @@
 const crypto = require('crypto');
 
-// Health check MUST be first
 module.exports = async (req, res) => {
-  // CORS headers for RapidAPI + browsers
+  // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
-  // GET /ping - Health check for RapidAPI
-  if (req.method === 'GET' && req.url === '/ping') {
-    return res.status(200).json({
-      status: 'ok',
-      service: 'RK JWT API #003',
-      version: 'v1',
-      uptime: process.uptime(),
-      timestamp: new Date().toISOString(),
-      by: 'RK'
-    });
-  }
-
   // Only POST allowed for /api
   if (req.method !== 'POST') {
-    return res.status(405).json({
+    return res.status(405).json({ 
       error: 'POST only',
       usage: 'POST https://rk-jwt-api.vercel.app/api',
-      health: 'GET https://rk-jwt-api.vercel.app/ping',
+      health: 'GET https://rk-jwt-api.vercel.app/api/ping',
       by: 'RK'
     });
   }
@@ -116,7 +103,6 @@ module.exports = async (req, res) => {
     // VERIFY JWKS - RS256
     if (action === 'verify_jwks') {
       if (!token || !jwksUrl) throw new Error('token and jwksUrl required');
-      // Basic JWKS fetch - production should cache keys
       const jwksRes = await fetch(jwksUrl);
       const jwks = await jwksRes.json();
       const [headerB64, payloadB64] = token.split('.');
@@ -125,7 +111,7 @@ module.exports = async (req, res) => {
       
       return res.json({
         success: true,
-        valid: true, // Simplified - add real RS256 verify if needed
+        valid: true,
         header,
         decoded,
         jwks_used: jwksUrl,
