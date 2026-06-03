@@ -12,15 +12,21 @@ module.exports = async (req, res) => {
   if (req.method !== 'POST') {
     return res.status(405).json({ 
       error: 'POST only',
-      usage: 'POST https://rk-jwt-api.vercel.app/api with JSON body',
+      usage: 'POST https://rk-jwt-api.vercel.app/api',
       example: { action: 'decode', token: 'eyJ...' },
       by: 'RK' 
     });
   }
 
+  // Parse body safely for Vercel
+  let body = {};
   try {
-    // Default to 'decode' if no action provided
-    const body = req.body || {};
+    body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
+  } catch (e) {
+    return res.status(400).json({ error: 'Invalid JSON body', by: 'RK' });
+  }
+
+  try {
     const { action = 'decode', token, tokens, secret, jwksUrl, payload, options } = body;
 
     // Validate token exists for actions that need it
@@ -28,7 +34,7 @@ module.exports = async (req, res) => {
     if (needsToken.includes(action) && !token) {
       return res.status(400).json({
         error: `Missing 'token' for action: ${action}`,
-        usage: `POST { "action": "${action}", "token": "eyJ..." }`,
+        usage: { action: action, token: 'eyJ...' },
         valid_actions: ['decode', 'bulk_decode', 'verify', 'verify_jwks', 'sign', 'inspect'],
         by: 'RK'
       });
@@ -39,22 +45,20 @@ module.exports = async (req, res) => {
     switch (action) {
       case 'decode': {
         const decoded = jwt.decode(token, { complete: true });
-        if (!decoded) throw new Error('Invalid JWT format - not a valid token');
+        if (!decoded) throw new Error('Invalid JWT format');
 
         const now = Math.floor(Date.now() / 1000);
         const exp = decoded.payload.exp;
-        const expired = exp ? now > exp : false;
-        const expiresIn = exp ? exp - now : null;
-
+        const iat = decoded.payload.iat;
+        
         result = {
           decoded: decoded.payload,
           header: decoded.header,
-          signature: decoded.signature,
           meta: {
-            expired,
-            expires_in_seconds: expiresIn,
-            expires_in_human: formatTime(expiresIn),
-            issued_at: decoded.payload.iat ? new Date(decoded.payload.iat * 1000).toISOString() : null,
+            expired: exp ? now > exp : false,
+            expires_in_seconds: exp ? exp - now : null,
+            expires_in_human: exp ? formatTime(exp - now) : null,
+            issued_at: iat ? new Date(iat * 1000).toISOString() : null,
             expires_at: exp ? new Date(exp * 1000).toISOString() : null
           }
         };
@@ -62,30 +66,25 @@ module.exports = async (req, res) => {
       }
 
       case 'verify': {
-        if (!secret) throw new Error("Missing 'secret' for verify action");
+        if (!secret) throw new Error("Missing 'secret' for verify");
         const verified = jwt.verify(token, secret, options || {});
-        result = { 
-          verified,
-          valid: true
-        };
+        result = { verified, valid: true };
         break;
       }
 
       case 'verify_jwks': {
-        if (!jwksUrl) throw new Error("Missing 'jwksUrl' for verify_jwks action");
+        if (!jwksUrl) throw new Error("Missing 'jwksUrl' for verify_jwks");
         
         const client = jwksClient({
           jwksUri: jwksUrl,
           cache: true,
-          rateLimit: true,
-          jwksRequestsPerMinute: 10
+          rateLimit: true
         });
 
         const getKey = (header, callback) => {
           client.getSigningKey(header.kid, (err, key) => {
             if (err) return callback(err);
-            const signingKey = key?.publicKey || key?.rsaPublicKey;
-            callback(null, signingKey);
+            callback(null, key?.publicKey || key?.rsaPublicKey);
           });
         };
 
@@ -96,55 +95,43 @@ module.exports = async (req, res) => {
           });
         });
 
-        result = { 
-          verified,
-          valid: true,
-          jwks_url: jwksUrl
-        };
+        result = { verified, valid: true, jwks_url: jwksUrl };
         break;
       }
 
       case 'sign': {
-        if (!payload) throw new Error("Missing 'payload' for sign action");
+        if (!payload) throw new Error("Missing 'payload' for sign");
         
         let signSecret = secret;
         if (options?.preset === 'auth0_test') signSecret = 'your-256-bit-secret';
         if (options?.preset === 'firebase') signSecret = 'firebase-secret';
-        if (!signSecret) throw new Error("Missing 'secret' or valid preset for sign action");
+        if (!signSecret) throw new Error("Missing 'secret' or preset");
         
-        const signOptions = options?.jwt || { algorithm: 'HS256', expiresIn: '1h' };
-        const newToken = jwt.sign(payload, signSecret, signOptions);
-        
-        result = { 
-          token: newToken,
-          decoded: jwt.decode(newToken, { complete: true })
-        };
+        const newToken = jwt.sign(payload, signSecret, options?.jwt || { algorithm: 'HS256', expiresIn: '1h' });
+        result = { token: newToken, decoded: jwt.decode(newToken, { complete: true }) };
         break;
       }
 
       case 'inspect': {
         const inspected = jwt.decode(token, { complete: true });
-        if (!inspected) throw new Error('Invalid JWT format - not a valid token');
+        if (!inspected) throw new Error('Invalid JWT format');
         
         const issues = [];
-        const header = inspected.header;
-        const payload = inspected.payload;
+        const h = inspected.header;
+        const p = inspected.payload;
         
-        // Security checks
-        if (header.alg === 'none') issues.push({ level: 'CRITICAL', msg: 'alg:none allows unsigned tokens - reject immediately' });
-        if (header.alg.startsWith('HS') && !secret) issues.push({ level: 'INFO', msg: 'HS algorithm used - provide secret to verify signature' });
-        if (!payload.exp) issues.push({ level: 'WARNING', msg: 'No expiry claim - token never expires' });
-        if (payload.exp && payload.exp < Date.now() / 1000) issues.push({ level: 'WARNING', msg: 'Token is expired' });
-        if (!payload.iat) issues.push({ level: 'INFO', msg: 'No issued-at claim' });
-        if (!payload.aud) issues.push({ level: 'INFO', msg: 'No audience claim' });
+        if (h.alg === 'none') issues.push({ level: 'CRITICAL', msg: 'alg:none allows unsigned tokens' });
+        if (!p.exp) issues.push({ level: 'WARNING', msg: 'No expiry claim' });
+        if (p.exp && p.exp < Date.now() / 1000) issues.push({ level: 'WARNING', msg: 'Token expired' });
+        if (h.alg.startsWith('HS') && !secret) issues.push({ level: 'INFO', msg: 'HS algorithm - provide secret to verify' });
         
         result = {
-          header,
-          payload,
+          header: h,
+          payload: p,
           security_audit: {
             issues,
             risk_level: issues.some(i => i.level === 'CRITICAL') ? 'CRITICAL' : issues.some(i => i.level === 'WARNING') ? 'MEDIUM' : 'LOW',
-            safe_to_use: !issues.some(i => i.level === 'CRITICAL')
+            safe: !issues.some(i => i.level === 'CRITICAL')
           }
         };
         break;
@@ -152,9 +139,7 @@ module.exports = async (req, res) => {
 
       case 'bulk_decode': {
         const tokenArray = tokens || token;
-        if (!Array.isArray(tokenArray)) {
-          throw new Error("bulk_decode expects 'tokens' or 'token' to be an array");
-        }
+        if (!Array.isArray(tokenArray)) throw new Error("bulk_decode expects 'tokens' array");
         
         result = {
           count: tokenArray.length,
@@ -163,18 +148,13 @@ module.exports = async (req, res) => {
               const d = jwt.decode(t, { complete: true });
               if (!d) throw new Error('Invalid format');
               return { 
-                index: idx,
+                index: idx, 
                 success: true, 
-                decoded: d.payload, 
-                header: d.header,
+                decoded: d.payload,
                 expired: d.payload.exp ? Date.now() / 1000 > d.payload.exp : null
               };
             } catch (e) {
-              return { 
-                index: idx,
-                success: false, 
-                error: e.message 
-              };
+              return { index: idx, success: false, error: e.message };
             }
           })
         };
@@ -184,23 +164,17 @@ module.exports = async (req, res) => {
       default:
         return res.status(400).json({
           error: `Invalid action: ${action}`,
-          usage: 'POST { "action": "decode", "token": "eyJ..." }',
           valid_actions: ['decode', 'bulk_decode', 'verify', 'verify_jwks', 'sign', 'inspect'],
           by: 'RK'
         });
     }
 
-    res.status(200).json({ 
-      success: true, 
-      ...result, 
-      by: 'RK' 
-    });
+    res.status(200).json({ success: true, ...result, by: 'RK' });
 
   } catch (error) {
     res.status(400).json({
       error: error.message,
-      usage: 'POST { "action": "decode", "token": "eyJ..." }',
-      docs: 'https://github.com/mawmav/rk-jwt-api',
+      usage: { action: 'decode', token: 'eyJ...' },
       by: 'RK'
     });
   }
@@ -211,7 +185,7 @@ function formatTime(seconds) {
   const abs = Math.abs(seconds);
   const sign = seconds < 0 ? '-' : '';
   if (abs < 60) return `${sign}${abs}s`;
-  if (abs < 3600) return `${sign}${Math.floor(abs / 60)}m ${abs % 60}s`;
-  if (abs < 86400) return `${sign}${Math.floor(abs / 3600)}h ${Math.floor((abs % 3600) / 60)}m`;
-  return `${sign}${Math.floor(abs / 86400)}d ${Math.floor((abs % 86400) / 3600)}h`;
+  if (abs < 3600) return `${sign}${Math.floor(abs / 60)}m`;
+  if (abs < 86400) return `${sign}${Math.floor(abs / 3600)}h`;
+  return `${sign}${Math.floor(abs / 86400)}d`;
 }
